@@ -1,4 +1,0 @@
-[Daemon]
-Autolock=false
-LockGrace=420
-LockOnResume=false
