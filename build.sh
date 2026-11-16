@@ -9,7 +9,9 @@ set -o pipefail
 echo "=== [1/4] cek sudo ==="
 sudo -n true || { echo "ERROR: sudo minta password, grant dulu"; exit 1; }
 
-echo "=== [2/4] bersihkan sisa lock pacman di repo / work ==="
+echo "=== [2/4] bersihkan sisa build, work, dan lock pacman ==="
+sudo rm -rf work/
+sudo rm -f build-*.log *.log
 if [ -f work/airootfs/var/lib/pacman/db.lck ]; then
     sudo rm -f work/airootfs/var/lib/pacman/db.lck
 fi
