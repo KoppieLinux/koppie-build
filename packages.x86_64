@@ -83,7 +83,6 @@ upower
 udisks2
 polkit
 calamares
-calamares-config-koppie
 squashfs-tools
 gptfdisk
 dbus
