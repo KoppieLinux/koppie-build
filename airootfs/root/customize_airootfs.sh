@@ -19,5 +19,19 @@ if [ -f "$KP" ]; then
     fi
 fi
 
-# 2. Pastikan db.lck bersih
+# 2. Pasang Tema Plymouth Spinner dari host
+PLY_SRC="/usr/share/koppie/overrides/plymouth-spinner"
+if [ -d "$PLY_SRC" ]; then
+    mkdir -p /usr/share/plymouth/themes/spinner
+    cp -af "$PLY_SRC"/* /usr/share/plymouth/themes/spinner/
+fi
+if [ -f /usr/share/koppie/overrides/plymouthd.conf ]; then
+    mkdir -p /etc/plymouth
+    cp -af /usr/share/koppie/overrides/plymouthd.conf /etc/plymouth/plymouthd.conf
+fi
+if command -v plymouth-set-default-theme >/dev/null 2>&1; then
+    plymouth-set-default-theme spinner || true
+fi
+
+# 3. Pastikan db.lck bersih
 rm -f /var/lib/pacman/db.lck
