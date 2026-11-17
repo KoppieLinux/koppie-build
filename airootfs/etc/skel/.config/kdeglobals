@@ -167,3 +167,10 @@ activeForeground=223,223,223
 inactiveBackground=50,50,50
 inactiveBlend=50,50,50
 inactiveForeground=223,223,223,100
+
+[General]
+ColorScheme=OrchisDark
+Name=OrchisDark
+
+[KDE]
+widgetStyle=Breeze

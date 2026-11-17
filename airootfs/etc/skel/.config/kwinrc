@@ -1,0 +1,8 @@
+[org.kde.kdecoration2]
+BorderSize=Normal
+BorderSizeAuto=true
+ButtonsOnLeft=M
+ButtonsOnRight=IAX
+CloseOnDoubleClickOnMenu=false
+library=org.kde.kwin.aurorae
+theme=kwin4_decoration_qml_metadata__org.kde.Orchis-dark
