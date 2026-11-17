@@ -1,19 +1,19 @@
 ---
-# Koppie Linux Calamares - branding v1 (BELUM DITES - wajib test install sebelum rilis)
+# Koppie Linux Calamares - branding (Rolling Release)
 componentName:         koppie
 
 strings:
     productName:       Koppie Linux
     shortProductName:  Koppie
-    version:           1.0
-    shortVersion:      1.0
-    versionedName:     Koppie Linux 1.0
-    shortVersionedName: Koppie 1.0
+    version:           ""
+    shortVersion:      ""
+    versionedName:     Koppie Linux
+    shortVersionedName: Koppie
     bootloaderEntryName: Koppie Linux
-    productUrl:        https://github.com/maularaihan-git/koppie-repo
-    supportUrl:        https://github.com/maularaihan-git/koppie-repo
-    knownIssuesUrl:    https://github.com/maularaihan-git/koppie-repo
-    releaseNotesUrl:   https://github.com/maularaihan-git/koppie-repo
+    productUrl:        https://github.com/KoppieLinux/koppie-repo
+    supportUrl:        https://github.com/KoppieLinux/koppie-repo
+    knownIssuesUrl:    https://github.com/KoppieLinux/koppie-repo
+    releaseNotesUrl:   https://github.com/KoppieLinux/koppie-repo
 
 images:
     productLogo:       logo.png

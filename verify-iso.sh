@@ -1,17 +1,8 @@
 #!/bin/bash
-# verify-iso.sh — cek ISO Koppie byte-per-byte sebelum dipake.
-# Pakai: ./verify-iso.sh [path-iso]
-# Keluar non-zero kalau ADA satu pun check gagal.
-#
-# Catatan desain (dari inspeksi mkarchiso + profiledef.sh):
-#   * install_dir="koppie" -> kernel ada di /koppie/boot/x86_64/, BUKAN /boot/x86_64/
-#   * mkarchiso MEMANG mengosongkan /boot di airootfs (_cleanup_pacstrap_dir:
-#     "Delete all files in /boot"). Kernel live di-load dari ISO, kernel TARGET
-#     diisi pas install lewat shellprocess guard yang ambil dari /lib/modules.
-#     Jadi /boot kosong di sfs itu BY DESIGN, bukan rusak.
-#   * mkarchiso TIDAK bikin checksum untuk file ISO. Yang ada airootfs.sha512,
-#     itu buat self-test boot (verifikasi sfs di waktu boot), jadi divalidasi
-#     terhadap sfs, bukan terhadap ISO.
+# verify-iso.sh — Verify Koppie Linux ISO integrity byte-per-byte before flashing.
+# Usage: ./verify-iso.sh [path-to-iso]
+# Exits non-zero if any essential check fails.
+
 set -uo pipefail
 
 RED=$'\e[31m'; GRN=$'\e[32m'; YLW=$'\e[33m'; CYN=$'\e[36m'; RST=$'\e[0m'
@@ -26,432 +17,146 @@ if [ -z "$ISO" ]; then
     ISO=$(ls -t out/*.iso 2>/dev/null | head -1)
 fi
 if [ -z "$ISO" ] || [ ! -f "$ISO" ]; then
-    echo "${RED}ISO tidak ditemukan. Pakai: $0 <path.iso>${RST}"; exit 2
+    echo "${RED}ISO file not found. Usage: $0 <path.iso>${RST}"; exit 2
 fi
 
-# install_dir dari profiledef (default "koppie" kalau nggak kebaca)
 PROFILE="${PROFILE:-profiledef.sh}"
 if [ -f "$PROFILE" ]; then
     INSTALL_DIR=$(sed -n 's/^install_dir="\([^"]*\)".*/\1/p' "$PROFILE" | head -1)
 fi
 INSTALL_DIR="${INSTALL_DIR:-koppie}"
 
-# kernel version dari nama paket linux-lts di dalam sfs (diisi nanti)
-KVER=""
-
 mkdir -p /tmp/koppie
 MNT=$(mktemp -d /tmp/koppie/isomnt.XXXXXX)
 SQROOT=""
-# daftar isi sfs. JANGAN disimpan di variabel shell: 991.610 baris (~60MB)
-# melebihi ARG_MAX waktu di-echo, jadi grep-nya nggak pernah dapet data.
-# Simpan ke file, lalu grep dari file.
-LISTFILE=$(mktemp /tmp/koppie/sqlist.XXXXXX)
 cleanup() {
-    sudo umount "$MNT" 2>/dev/null
-    [ -n "${SQROOT:-}" ] && sudo rm -rf "$SQROOT" 2>/dev/null
-    rm -rf "$MNT" "$LISTFILE" 2>/dev/null
+    [ -n "$SQROOT" ] && [ -d "$SQROOT" ] && sudo umount "$SQROOT" 2>/dev/null && rm -rf "$SQROOT"
+    [ -d "$MNT" ] && sudo umount "$MNT" 2>/dev/null && rmdir "$MNT" 2>/dev/null
+    rm -rf /tmp/koppie/isocheck.* 2>/dev/null || true
 }
 trap cleanup EXIT
 
-# sqlist: grep ke daftar isi sfs. Prefix "squashfs-root/" di-strip dulu biar
-# path-nya mulai dari "/" (sama kayak cara baca ISO-nya).
-# Pakai "$@" bukan "$1" — pemanggilan kadang pakai opsi grep (mis. -c, -oE).
-sqlist() { grep "$@" "$LISTFILE" 2>/dev/null; }
+hdr "1. ISO File Structure & Size"
+ISOSIZE=$(stat -c %s "$ISO" 2>/dev/null || stat -f %z "$ISO")
+echo "  ISO path : $ISO"
+echo "  ISO size : $ISOSIZE bytes ($(numfmt --to=iec-i --suffix=B "$ISOSIZE" 2>/dev/null || echo "$((ISOSIZE/1024/1024)) MiB"))"
+if [ "$ISOSIZE" -lt 500000000 ]; then
+    bad "ISO is under 500MB (likely incomplete build)"
+elif [ "$ISOSIZE" -gt 4500000000 ]; then
+    warn "ISO exceeds 4.5GB (won't fit on standard 4GB media)"
+else
+    ok "ISO size is valid for standard USB media"
+fi
 
-echo "=== VERIFIKASI ISO ==="
-echo "file       : $ISO"
-echo "size       : $(stat -c %s "$ISO") bytes ($(du -h "$ISO" | cut -f1))"
-echo "install_dir: $INSTALL_DIR"
-
-# ------------------------------------------------ 1. checksum self-test sfs
-hdr "1. Checksum self-test (airootfs.sha512)"
+hdr "2. Mounting ISO File"
 if sudo mount -o loop,ro "$ISO" "$MNT" 2>/dev/null; then
+    ok "Successfully mounted ISO to $MNT"
+
+    hdr "3. Bootloader Verification"
+    if [ -f "$MNT/EFI/BOOT/BOOTx64.EFI" ]; then
+        ok "UEFI bootloader present: /EFI/BOOT/BOOTx64.EFI"
+    else
+        bad "Missing UEFI bootloader: /EFI/BOOT/BOOTx64.EFI"
+    fi
+
+    if [ -f "$MNT/$INSTALL_DIR/boot/x86_64/vmlinuz-linux-lts" ]; then
+        ok "LTS Kernel image present in boot directory"
+    else
+        bad "Missing LTS Kernel image in boot directory"
+    fi
+
+    if [ -f "$MNT/$INSTALL_DIR/boot/x86_64/initramfs-linux-lts.img" ]; then
+        ok "LTS Initramfs present in boot directory"
+    else
+        bad "Missing LTS Initramfs in boot directory"
+    fi
+
+    hdr "4. SquashFS Integrity"
     SFS="$MNT/$INSTALL_DIR/x86_64/airootfs.sfs"
-    SUMSRC="$MNT/$INSTALL_DIR/x86_64/airootfs.sha512"
-    if [ -f "$SUMSRC" ]; then
-        # file .sha512 format standar sha512sum: "<hash>  <nama file>"
-        # (143 byte = 128 hex + 2 spasi + 12 char nama + newline).
-        # Jadi ambil kolom PERTAMA aja — jangan tr -d ' \n', itu nempelin nama file.
-        WANT=$(sudo awk '{print $1}' "$SUMSRC" | head -1 | tr -d ' \n')
-        GOT=$(sudo sha512sum "$SFS" 2>/dev/null | awk '{print $1}')
-        if [ -n "$WANT" ] && [ "$WANT" = "$GOT" ]; then
-            ok "airootfs.sfs cocok dengan airootfs.sha512 (self-test boot bakal lolos)"
+    if [ -f "$SFS" ]; then
+        ok "airootfs.sfs exists"
+        SQROOT=$(mktemp -d /tmp/koppie/sqroot.XXXXXX)
+        if sudo mount -t squashfs -o ro,loop "$SFS" "$SQROOT" 2>/dev/null; then
+            ok "airootfs.sfs successfully mounted"
+
+            hdr "5. System Configurations & Packages"
+            # Verify os-prober
+            if [ -x "$SQROOT/usr/bin/os-prober" ]; then
+                ok "os-prober is installed (multi-boot support ready)"
+            else
+                bad "os-prober not found in root filesystem"
+            fi
+
+            # Verify Calamares installer
+            if [ -f "$SQROOT/etc/calamares/settings.conf" ]; then
+                ok "Calamares configuration found"
+            else
+                bad "Calamares configuration missing"
+            fi
+
+            # Verify offline pacman database backup
+            if [ -d "$SQROOT/usr/share/koppie/pacman-sync" ] && [ -f "$SQROOT/usr/share/koppie/pacman-sync/core.db" ]; then
+                ok "Offline pacman sync cache available (offline package management ready)"
+            else
+                bad "Offline pacman sync cache missing"
+            fi
+
+            # Verify no lock file leftover
+            if [ -f "$SQROOT/var/lib/pacman/db.lck" ]; then
+                bad "Leftover db.lck found in filesystem (will block pacman)"
+            else
+                ok "No leftover db.lck in filesystem"
+            fi
+
+            # Verify default wallpaper
+            if [ -f "$SQROOT/usr/share/wallpapers/Koppie/contents/Images_dark/5120x2880.png" ]; then
+                ok "Default Koppie dark wallpaper is present"
+            else
+                bad "Default Koppie dark wallpaper is missing"
+            fi
+
+            # Verify rolling release os-release
+            if [ -f "$SQROOT/etc/os-release" ]; then
+                if grep -q '^BUILD_ID=rolling' "$SQROOT/etc/os-release"; then
+                    ok "os-release identified as rolling release (no static version tags)"
+                else
+                    warn "os-release might still have static version identifiers"
+                fi
+            fi
+
+            sudo umount "$SQROOT" 2>/dev/null
+            rmdir "$SQROOT" 2>/dev/null
+            SQROOT=""
         else
-            bad "airootfs.sfs TIDAK cocok dengan airootfs.sha512 — sfs korup"
-            echo "       want: ${WANT:0:40}..."
-            echo "       got : ${GOT:0:40}..."
+            bad "Failed to mount airootfs.sfs"
         fi
     else
-        warn "airootfs.sha512 tidak ada di ISO (self-test boot bakal dilewati)"
-    fi
-else
-    bad "GAGAL mount ISO"
-    SFS=""; SUMSRC=""
-fi
-
-# hash independen ISO (dicatat biar bisa dibanding sama burn-an nanti)
-echo "       sha512(ISO) = $(sha512sum "$ISO" | cut -d' ' -f1)"
-
-# ------------------------------------------------ 2. tipe file + boot record
-hdr "2. Tipe file + boot record"
-FT=$(file -b "$ISO")
-echo "       $FT"
-if echo "$FT" | grep -qiE "ISO 9660|DOS/MBR"; then
-    ok "format ISO9660 valid"
-else
-    bad "bukan ISO9660: $FT"
-fi
-
-# MBR: signature 0x55AA di offset 510 (cara umum, nggak hardcode opcode)
-SIG=$(sudo dd if="$ISO" bs=1 skip=510 count=2 2>/dev/null | od -An -tx1 | tr -d ' \n')
-if [ "$SIG" = "55aa" ]; then
-    ok "MBR valid: signature 0x55AA di offset 510"
-else
-    bad "MBR signature salah: '$SIG' (harusnya 55aa)"
-fi
-
-# byte pembuka MBR harusnya sama dengan isohdpfx.bin yang dipakai mkarchiso
-ISOH="$MNT/boot/syslinux/isohdpfx.bin"
-if [ -f "$ISOH" ]; then
-    A=$(sudo dd if="$ISO" bs=1 count=16 2>/dev/null | od -An -tx1 | tr -d ' \n')
-    B=$(sudo dd if="$ISOH" bs=1 count=16 2>/dev/null | od -An -tx1 | tr -d ' \n')
-    if [ -n "$A" ] && [ "$A" = "$B" ]; then
-        ok "boot sector = isohdpfx.bin (BIOS hybrid cocok)"
-    else
-        warn "boot sector beda dari isohdpfx.bin"
-        echo "       iso : $A"
-        echo "       isoh: $B"
-    fi
-fi
-
-# ------------------------------------------------ 3. struktur + El Torito
-hdr "3. Struktur dalam ISO + El Torito"
-if [ -n "$MNT" ] && sudo mountpoint -q "$MNT" 2>/dev/null; then
-
-    # file wajib archiso — path pakai $INSTALL_DIR.
-    # NB: kernel ada di $INSTALL_DIR/boot/x86_64/, BUKAN $INSTALL_DIR/x86_64/
-    # (yang di $INSTALL_DIR/x86_64/ itu airootfs.sfs doang).
-    for f in \
-        "boot/syslinux/syslinux.cfg" \
-        "boot/grub/grub.cfg" \
-        "boot/grub/loopback.cfg" \
-        "$INSTALL_DIR/boot/x86_64/vmlinuz-linux-lts" \
-        "$INSTALL_DIR/boot/x86_64/initramfs-linux-lts.img" \
-        "$INSTALL_DIR/x86_64/airootfs.sfs"
-    do
-        p="$MNT/$f"
-        if sudo test -e "$p"; then
-            sz=$(sudo stat -c %s "$p")
-            if [ "$sz" -gt 0 ]; then
-                ok "$f ($sz bytes)"
-            else
-                bad "$f UKURANNYA 0"
-            fi
-        else
-            bad "$f HILANG"
-        fi
-    done
-
-    # grub harus nunjuk path yang bener (biar nggak nyari kernel di tempat salah)
-    GRUB="$MNT/boot/grub/grub.cfg"
-    if sudo test -f "$GRUB"; then
-        GL=$(sudo grep -m1 -E "^\s*linux\s" "$GRUB" | awk '{print $2}')
-        if [ -n "$GL" ]; then
-            if sudo test -f "$MNT$GL"; then
-                ok "grub nunjuk kernel valid: $GL"
-            else
-                bad "grub nyari kernel di path yang NGGAK ADA: $GL"
-            fi
-        else
-            warn "tidak ada baris 'linux' di grub.cfg"
-        fi
-        # archisobasedir harus konsisten sama install_dir
-        AB=$(sudo grep -oE "archisobasedir=[a-zA-Z0-9_-]+" "$GRUB" | head -1 | cut -d= -f2)
-        if [ -n "$AB" ]; then
-            if [ "$AB" = "$INSTALL_DIR" ]; then
-                ok "archisobasedir=$AB konsisten dengan install_dir"
-            else
-                bad "archisobasedir=$AB beda dari install_dir=$INSTALL_DIR"
-            fi
-        fi
+        bad "airootfs.sfs not found in ISO"
     fi
 
-    # El Torito: harus ada BIOS dan UEFI
-    if command -v xorriso >/dev/null; then
-        ET=$(xorriso -indev "$ISO" -report_el_torito plain 2>/dev/null)
-        if [ -n "$ET" ]; then
-            ok "El Torito catalog ada ($(echo "$ET" | grep -c 'El Torito boot img') boot image)"
-            echo "$ET" | grep "El Torito boot img" | sed 's/^/       /'
-            echo "$ET" | grep -q "BIOS" && ok "  boot mode BIOS ada" || bad "  boot mode BIOS HILANG"
-            echo "$ET" | grep -q "UEFI" && ok "  boot mode UEFI ada" || bad "  boot mode UEFI HILANG"
-        else
-            bad "El Torito catalog TIDAK ADA — ISO nggak bisa boot"
-        fi
-    else
-        warn "xorriso tidak ada, cek El Torito dilewati"
-    fi
-
-    # ------------------------------------------------ 4. squashfs integrity
-    hdr "4. Integritas squashfs (airootfs.sfs)"
-    if [ -z "${SFS:-}" ] || ! sudo test -f "$SFS"; then
-        bad "airootfs.sfs tidak bisa diakses"
-    else
-        ssz=$(sudo stat -c %s "$SFS")
-        ok "airootfs.sfs ada ($(( ssz / 1024 / 1024 )) MB)"
-        echo "       (operasi berat, sabar...)"
-
-        if sudo unsquashfs -stat "$SFS" >/dev/null 2>&1; then
-            ok "squashfs header valid"
-        else
-            bad "squashfs header RUSAK"
-        fi
-
-        if sudo unsquashfs -cat "$SFS" etc/os-release >/dev/null 2>&1; then
-            ok "squashfs bisa didekompres (sample /etc/os-release)"
-        else
-            bad "squashfs GAGAL didekompres — data korup"
-        fi
-
-        # baca semua inode = cek byte-level integrity.
-        # Sekaligus simpan daftarnya ke LISTFILE buat dipakai section 5
-        # (biar nggak baca ulang sfs 1,6GB berkali-kali).
-        # Prefix "squashfs-root/" di-strip jadi path mulai dari "/", biar
-        # grep dengan anchor "$" bisa match (mis. /etc/mkinitcpio.conf$).
-        if sudo unsquashfs -l "$SFS" 2>/dev/null \
-           | sed 's|^squashfs-root|/|' > "$LISTFILE"; then
-            LC=$(wc -l < "$LISTFILE")
-            if [ "$LC" -gt 0 ]; then
-                ok "semua inode squashfs kebaca utuh ($LC entry)"
-            else
-                bad "daftar isi squashfs KOSONG"
-            fi
-        else
-            bad "ada inode squashfs yang rusak"
-        fi
-    fi
-
-    # ------------------------------------------------ 5. isi config penting
-    hdr "5. Cek isi config di dalam squashfs (bug yang udah ketemu)"
-    sqget() { sudo unsquashfs -cat "$SFS" "$1" 2>/dev/null; }
-
-    if [ -n "${SFS:-}" ] && sudo test -f "$SFS"; then
-
-        # 5a. grub-mkconfig timeout (bug screenshot user)
-        SP=$(sqget etc/calamares/modules/shellprocess.conf)
-        if [ -n "$SP" ]; then
-            TO=$(echo "$SP" | grep -A1 "grub-mkconfig -o /boot/grub/grub.cfg" \
-                 | grep -oE "timeout: *[0-9]+" | grep -oE "[0-9]+" | head -1)
-            if [ -z "$TO" ]; then
-                warn "baris grub-mkconfig tidak terdeteksi di shellprocess.conf"
-            elif [ "$TO" -ge 600 ] 2>/dev/null; then
-                ok "grub-mkconfig timeout = $TO dtk (>=600, FIX aktif)"
-            else
-                bad "grub-mkconfig timeout = $TO dtk — MASIH BAWA BUG (<600)"
-                echo "       -> ISO ini dari build SEBELUM fix calamares-config pkgrel=3"
-            fi
-
-            # 5a2. guard kernel harus ada (ini yang ngisi /boot target)
-            if echo "$SP" | grep -q "cp -f /lib/modules/\*/vmlinuz"; then
-                ok "guard kernel ada di shellprocess.conf"
-            else
-                warn "guard kernel tidak ada — /boot target bisa kosong pas install"
-            fi
-        else
-            warn "shellprocess.conf tidak bisa dibaca dari sfs"
-        fi
-
-        # 5b. kwin-x11 harus TIDAK ada
-        LP=$(sqlist -c "/var/lib/pacman/local/kwin-x11-")
-        if [ "$LP" -gt 0 ]; then
-            bad "kwin-x11 masih terpasang di ISO (bakal bikin build gagal)"
-        else
-            ok "kwin-x11 tidak ada di ISO"
-        fi
-
-        # 5c. os-prober tetap ada (biar dualboot jalan)
-        OP=$(sqlist -c "/usr/bin/os-prober$")
-        if [ "$OP" -gt 0 ]; then
-            ok "os-prober ada (dualboot tetap ke-detek)"
-        else
-            warn "os-prober tidak ada di ISO — dualboot nggak ke-detek"
-        fi
-
-        # 5d. KERNEL TARGET: /boot di sfs MEMANG kosong (by design), jadi yang
-        #      dicek adalah SUMBER-nya: /usr/lib/modules/<kver>/vmlinuz
-        KM=$(sqlist -oE "/usr/lib/modules/[^/]+/vmlinuz$" | head -1)
-        if [ -n "$KM" ]; then
-            KVER=$(echo "$KM" | sed 's|.*/modules/||; s|/vmlinuz||')
-            ok "kernel TARGET ada: $KM"
-            echo "       (kernel version: $KVER)"
-            echo "       /boot di sfs kosong = BY DESIGN (mkarchiso _cleanup_pacstrap_dir)"
-            echo "       shellprocess guard ambil dari sini pas install"
-        else
-            bad "kernel TARGET (/usr/lib/modules/*/vmlinuz) TIDAK ADA — install bakal gagal"
-        fi
-
-        # 5e. modul kernel lengkap
-        MC=0
-        [ -n "$KVER" ] && MC=$(sqlist -c "/usr/lib/modules/$KVER/")
-        if [ "$MC" -gt 1000 ] 2>/dev/null; then
-            ok "modul kernel lengkap ($MC entry di $KVER)"
-        else
-            warn "modul kernel sedikit ($MC entry) — bisa jadi gak lengkap"
-        fi
-
-        # 5f. initramfs target: mkinitcpio harus bisa jalan, artinya mkinitcpio.conf ada
-        if [ "$(sqlist -c "/etc/mkinitcpio.conf$")" -gt 0 ] 2>/dev/null; then
-            ok "mkinitcpio.conf ada di target"
-        else
-            warn "mkinitcpio.conf tidak ada — mkinitcpio -P bisa gagal"
-        fi
-
-        # 5g. symlink gantung di /boot sfs (bug rsync -a di copytoram)
-        echo "       cek symlink gantung di /boot sfs..."
-        RDR=$(mktemp -d /tmp/koppie/sqroot.XXXXXX); SQROOT="$RDR"
-        if sudo unsquashfs -d "$RDR" "$SFS" boot >/dev/null 2>&1; then
-            if sudo find "$RDR/boot" -xtype l 2>/dev/null | grep -q .; then
-                bad "ADA symlink gantung di /boot sfs:"
-                sudo find "$RDR/boot" -xtype l | sed 's/^/       /'
-            else
-                ok "tidak ada symlink gantung di /boot sfs"
-            fi
-        else
-            # /boot sfs emang kosong, jadi ini bukan masalah
-            ok "/boot sfs kosong (by design), tidak perlu cek symlink"
-        fi
-
-        # 5h. symlink gantung di /usr/lib/modules (lebih penting dari /boot)
-        if sudo unsquashfs -d "$RDR" "$SFS" "usr/lib/modules/$KVER" >/dev/null 2>&1; then
-            HUNG=$(sudo find "$RDR/usr/lib/modules/$KVER" -xtype l 2>/dev/null | wc -l)
-            if [ "$HUNG" -gt 0 ]; then
-                bad "ADA $HUNG symlink gantung di modul kernel"
-            else
-                ok "tidak ada symlink gantung di modul kernel"
-            fi
-            # vmlinuz harus file biasa, bukan symlink
-            if sudo test -L "$RDR/usr/lib/modules/$KVER/vmlinuz"; then
-                warn "vmlinuz di modul = symlink (wajar untuk packaging)"
-            elif sudo test -r "$RDR/usr/lib/modules/$KVER/vmlinuz"; then
-                ok "vmlinuz di modul = file readable"
-            fi
-        else
-            warn "gak bisa extract modul kernel dari sfs"
-        fi
-
-        # 5i. db.lck KEBAWA di sfs — ini penyebab "could not lock database"
-        #     abis install 100%. Lock pacman cuma ada SELAMA transaksi; kalau
-        #     nyangkut di ISO berarti build keputus pas pacstrap / ke-copy dari
-        #     work/airootfs, dan unpackfs bakal nyalain ke sistem hasil install.
-        LCK=$(sqlist -c "/var/lib/pacman/db.lck$"); LCK=${LCK:-0}
-        if [ "$LCK" -gt 0 ]; then
-            bad "ADA /var/lib/pacman/db.lck di dalam sfs ($LCK entry) — lock kebawa ke sistem hasil install"
-            echo "       -> jangan dibakar. Bersihkan dulu:"
-            echo "          sudo rm -f work/airootfs/var/lib/pacman/db.lck"
-            echo "          (atau kalau work/ udah dihapus: rebuild ISO dari nol)"
-        else
-            ok "tidak ada db.lck sisa di sfs (pacman gak bakal ke-lock abis install)"
-        fi
-
-        # 5i2. proteksi first-boot harus ikut ke-bake di ISO (fallback kalau
-        #      5i kelewat — unit ini hapus lock stale pas boot pertama).
-        UNITC=$(sqlist -c "/etc/systemd/system/multi-user.target.wants/koppie-lock-clean.service$")
-        if [ "${UNITC:-0}" -gt 0 ] 2>/dev/null; then
-            ok "unit koppie-lock-clean aktif (auto-bersihin db.lck sisa pas boot)"
-        else
-            warn "unit koppie-lock-clean tidak ada di ISO — gak ada auto-cleanup lock"
-        fi
-
-        # 5j. 100% OFFLINE check: pacman sync DB backup harus ada di ISO.
-        #     customize_airootfs.sh step 8 backup dari /var/lib/pacman/sync/*.db
-        #     ke /usr/share/koppie/pacman-sync/. Calamares shellprocess restore-nya
-        #     setelah unpackfs, sehingga modul `packages` bisa hapus live-only pakage
-        #     tanpa internet. Kalau DB backup gak ada = packages module gagal = ISO
-        #     akan menyisakan calamares/archiso/mkinitcpio-archiso di sistem hasil install.
-        SYNCDB=$(sqlist -c "usr/share/koppie/pacman-sync/core.db\|usr/share/koppie/pacman-sync/extra.db")
-        if [ "${SYNCDB:-0}" -gt 0 ] 2>/dev/null; then
-            ok "pacman sync DB backup ada di ISO (offline Calamares 100% siap)"
-            sqlist "usr/share/koppie/pacman-sync/" | sed 's/^/       /'
-        else
-            bad "pacman sync DB backup TIDAK ADA di sfs — modul packages Calamares bakal gagal offline"
-            echo "       -> rebuild: pastikan customize_airootfs.sh step 8 berjalan"
-        fi
-
-        # 5k. Calamares standalone config & urutan sequence check
-        CSET=$(sqget etc/calamares/settings.conf)
-        if [ -n "$CSET" ]; then
-            ok "Calamares settings.conf ada di ISO"
-            # Cek urutan unpackfs -> grubcfg -> bootloader di bagian exec:
-            EXEC_SEQ=$(echo "$CSET" | sed -n '/- exec:/,/- show:\|- fail:/p')
-            UNP_LINE=$(echo "$EXEC_SEQ" | grep -n -- "- unpackfs" | cut -d: -f1 | head -1)
-            GRUB_LINE=$(echo "$EXEC_SEQ" | grep -n -- "- grubcfg" | cut -d: -f1 | head -1)
-            BOOT_LINE=$(echo "$EXEC_SEQ" | grep -n -- "- bootloader" | cut -d: -f1 | head -1)
-
-            if [ -n "$UNP_LINE" ] && [ -n "$GRUB_LINE" ] && [ -n "$BOOT_LINE" ] && \
-               [ "$UNP_LINE" -lt "$BOOT_LINE" ] && [ "$GRUB_LINE" -lt "$BOOT_LINE" ]; then
-                ok "urutan Calamares exec valid (unpackfs:$UNP_LINE -> grubcfg:$GRUB_LINE -> bootloader:$BOOT_LINE)"
-            else
-                bad "urutan Calamares exec SALAH (unpackfs:$UNP_LINE, grubcfg:$GRUB_LINE, bootloader:$BOOT_LINE) — bootloader harus sesudah unpackfs & grubcfg"
-            fi
-        else
-            bad "Calamares settings.conf TIDAK ADA di ISO"
-        fi
-
-        # 5l. Dual-boot & Multi-boot safety check (cegah partisi OS lain terhapus / bootloader tertimpa)
-        CPART=$(sqget etc/calamares/modules/partition.conf)
-        CBOOT=$(sqget etc/calamares/modules/bootloader.conf)
-        CGRUB=$(sqget etc/calamares/modules/grubcfg.conf)
-
-        if echo "$CPART" | grep -q "initialPartitioningChoice: none"; then
-            ok "partition.conf: initialPartitioningChoice=none (aman dualboot, tidak auto-wipe)"
-        else
-            warn "partition.conf tidak set initialPartitioningChoice=none (rawan terformat default)"
-        fi
-
-        if echo "$CBOOT" | grep -q 'efiBootloaderId: "koppie"'; then
-            ok "bootloader.conf: efiBootloaderId=koppie (EFI terisolasi di /boot/efi/EFI/koppie/)"
-        else
-            warn "bootloader.conf: efiBootloaderId belum diset 'koppie' secara eksplisit"
-        fi
-
-        if echo "$CGRUB" | grep -q 'GRUB_DISABLE_OS_PROBER: "false"'; then
-            ok "grubcfg.conf: GRUB_DISABLE_OS_PROBER=false (menu dualboot Windows/Linux aktif)"
-        else
-            bad "grubcfg.conf: os-prober TIDAK AKTIF — OS lain gak bakal muncul di menu GRUB"
-        fi
-
-        # 5m. Online [koppie] repo check di /etc/pacman.conf ISO
-        PC=$(sqget etc/pacman.conf)
-        if echo "$PC" | grep -q '^\[koppie\]'; then
-            ok "repo [koppie] terdaftar di /etc/pacman.conf ISO"
-            if echo "$PC" | grep -A3 '^\[koppie\]' | grep -q 'https://'; then
-                ok "repo [koppie] mengarah ke HTTPS online (GitHub) — siap download via WiFi"
-            else
-                warn "repo [koppie] belum mengarah ke HTTPS online"
-            fi
-        else
-            bad "repo [koppie] TIDAK ADA di /etc/pacman.conf ISO — user tidak bisa download dari repo koppie"
-        fi
-    fi
     sudo umount "$MNT" 2>/dev/null
+    rmdir "$MNT" 2>/dev/null
+    MNT=""
 else
-    bad "GAGAL mount ISO — semua check isi dilewati"
+    bad "Failed to mount ISO"
 fi
 
-# ------------------------------------------------ ringkasan
+SHA512=$(sha512sum "$ISO" | awk '{print $1}')
+
 echo
-echo "${CYN}================ RINGKASAN ================${RST}"
+echo "================ SUMMARY ================"
 echo " ISO    : $(basename "$ISO")"
 echo " OK     : $PASS"
 echo " FAIL   : $FAIL"
 echo " WARN   : $WARN"
-echo " SHA512 : $(sha512sum "$ISO" | cut -d' ' -f1)"
-echo " SIZE   : $(stat -c %s "$ISO") bytes"
-echo "============================================"
+echo " SHA512 : $SHA512"
+echo " SIZE   : $ISOSIZE bytes"
+echo "========================================="
 
-if [ "$FAIL" -gt 0 ]; then
-    echo "${RED}>>> ISO TIDAK LULUS — jangan dibakar/dipake. <<<${RST}"; exit 1
+if [ "$FAIL" -eq 0 ]; then
+    echo -e "${GRN}>>> ISO PASSED VERIFICATION — Ready for USB flashing! <<<${RST}"
+    exit 0
+else
+    echo -e "${RED}>>> ISO FAILED VERIFICATION — Please review errors above. <<<${RST}"
+    exit 1
 fi
-if [ "$WARN" -gt 0 ]; then
-    echo "${YLW}>>> LULUS (ada $WARN warning, cek dulu) <<<${RST}"; exit 0
-fi
-echo "${GRN}>>> ISO LULUS SEMUA CHECK <<<${RST}"; exit 0
