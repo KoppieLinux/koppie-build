@@ -34,12 +34,16 @@ Koppie Linux relies on custom packages (`koppie-software-centre`, `koppie-update
 
 Set up the local repository packages in `koppie-repo/x86_64`:
 ```bash
-# Clone the custom package repository
-git clone https://github.com/KoppieLinux/koppie-repo.git koppie-repo
+# Clone the custom package repository (or pull latest changes if already present)
+if [ ! -d "koppie-repo" ]; then
+    git clone https://github.com/KoppieLinux/koppie-repo.git koppie-repo
+else
+    git -C koppie-repo pull
+fi
 
 # Generate pacman repository database
 cd koppie-repo/x86_64
-repo-add koppie.db.tar.gz *.pkg.tar.zst
+repo-add -n -R koppie.db.tar.gz *.pkg.tar.zst
 ln -sf koppie.db.tar.gz koppie.db
 ln -sf koppie.files.tar.gz koppie.files
 cd ~/Projects/koppie-arch
@@ -55,14 +59,15 @@ Server = file:///home/$USER/Projects/koppie-arch/koppie-repo/x86_64
 *(Replace `$USER` with your system username).*
 
 ### 4. Build the ISO
-Execute the provided build script with sudo:
+Execute the provided build script:
 ```bash
-sudo ./build.sh
+./build.sh
 ```
 
 > **Note:** The `build.sh` script automatically:
+> - Prompts for `sudo` password if needed.
 > - Activates `systemd-inhibit` to prevent the system from sleeping or suspending during compilation.
-> - Cleans any leftover pacman `db.lck` locks.
+> - Cleans any leftover pacman `db.lck` locks and previous `work/` directory.
 > - Compiles and outputs the bootable ISO file into the `out/` directory.
 > - Automatically runs `verify-iso.sh` to validate checksums and file integrity upon completion.
 
