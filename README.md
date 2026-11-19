@@ -61,7 +61,7 @@ Server = file:///home/$USER/Projects/koppie-arch/koppie-repo/x86_64
 ### 4. Build the ISO
 Execute the provided build script:
 ```bash
-./build.sh
+sudo ./build.sh
 ```
 
 > **Note:** The `build.sh` script automatically:
