@@ -49,8 +49,8 @@ ln -sf koppie.files.tar.gz koppie.files
 cd ~/Projects/koppie-arch
 ```
 
-### 3. Verify Local Path in `pacman.conf`
-Ensure the local repository path in `pacman.conf` matches your user path:
+### 3. Verify Local Path in `/etc/pacman.conf`
+Ensure the local repository path in `/etc/pacman.conf` matches your user path:
 ```ini
 [koppie]
 SigLevel = Optional TrustAll
