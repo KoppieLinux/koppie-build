@@ -41,9 +41,8 @@ else
     git -C koppie-repo pull
 fi
 
-# Generate pacman repository database
+# Ensure database symlinks are properly pointed
 cd koppie-repo/x86_64
-repo-add -n -R koppie.db.tar.gz *.pkg.tar.zst
 ln -sf koppie.db.tar.gz koppie.db
 ln -sf koppie.files.tar.gz koppie.files
 cd ~/Projects/koppie-arch
